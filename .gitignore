@@ -1,9 +1,9 @@
-resources/projects.xlsx
+resources/*.xlsx
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-
+research
 # C extensions
 *.so
 
