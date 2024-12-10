@@ -17,7 +17,7 @@ CONSUMER_SECRET = os.getenv("MIRAHEZE_CONSUMER_SECRET")
 ACCESS_TOKEN = os.getenv("MIRAHEZE_ACCESS_TOKEN")
 ACCESS_SECRET = os.getenv("MIRAHEZE_ACCESS_SECRET")
 
-API_URL = "https://impact.miraheze.org/w/api.php"
+API_URL = "https://ief.wiki/w/api.php"
 
 def create_oauth_session():
     """Create an OAuth1 session using the access token and secret."""
@@ -87,7 +87,7 @@ def create_wiki_page(title, content, oauth_session):
 
 def sanitize_title(title):
     """Sanitize the title to remove special characters."""
-    return re.sub(r'[<>:"/\\|?*]', "_", title)
+    return re.sub(r'[<>:"/\\|?* ]', "_", title)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -95,7 +95,7 @@ def main():
     )
 
     parser.add_argument(
-        "--file-path",
+        "--projects-file",
         type=str,
         default="resources/projects.xlsx",
         help="Path to the XLSX file containing project names. Default is 'resources/projects.xlsx'."
@@ -104,7 +104,7 @@ def main():
     args = parser.parse_args()
 
     # Read the XLSX file
-    df = pd.read_excel(args.file_path)
+    df = pd.read_excel(args.projects_file)
 
     if df.empty:
         print("The XLSX file contains no data.")
