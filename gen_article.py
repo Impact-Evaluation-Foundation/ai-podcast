@@ -6,13 +6,17 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv
 import re
+from gpt_researcher import GPTResearcher
+import subprocess
+
 
 # Load environment variables
 load_dotenv()
 
 # Initialize API clients
+os.environ['OPENAI_API_KEY']=os.getenv("OPENAI_API_KEY")
+os.environ['TAVILY_API_KEY']=os.getenv("TAVILY_API_KEY")
 API_KEY = os.getenv("PERPLEXITY_KEY")
-researchClient = OpenAI(api_key=API_KEY, base_url="https://api.perplexity.ai")
 aiClient = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Create necessary directories
@@ -33,97 +37,28 @@ def save_to_file(file_path, content):
 
 # Utility: Sanitize filenames by removing special characters
 def sanitize_filename(name):
-    return re.sub(r'[<>:"/\\|?*]', "_", name)
+    return re.sub(r'[<>:"/\\|?* ]', "_", name)
 
-# Async function to fetch research data from Perplexity API
-async def fetch_research_data(project_name):
+# Load prompts from prompts.xlsx
+def load_prompts(prompts_file_path):
+    return pd.read_excel(prompts_file_path)
+
+# Async function to fetch research data with Tavily x GPT
+async def fetch_research_data(project_name, system_prompt, user_prompt):
     log_message(f"Fetching research data for project: {project_name}")
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an AI assistant specializing in retrieving detailed research "
-                "information about projects based on a given name and URL. Your task "
-                "is to gather data that will be used to draft a structured Wikipedia article."
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"""
-        Collect detailed and well-structured information about the '{project_name}' project/entity. 
-        Your task is to retrieve and summarize data to fit the structure of a Wikipedia article.
+    researcher = GPTResearcher(user_prompt, "research_report")
+    research_result = await researcher.conduct_research()
+    report = await researcher.write_report()
+    
+    return report
 
-        Use the following structure as a guide:
-        1. **Introduction**:
-            - Provide an overview of the project/entity.
-            - Explain its significance or purpose.
-        2. **Role Summary** (Optional):
-            - Include expanded details about its scope or mission.
-        3. **Key Features/Responsibilities** (Optional):
-            - Describe its functions or unique aspects.
-        4. **Skills and Qualifications** (Optional):
-            - Include any qualifications or certifications it involves.
-        5. **Methodologies and Tools** (Optional):
-            - Highlight methodologies or tools associated with it.
-        6. **Impact/Significance** (Optional):
-            - Discuss societal, environmental, or economic contributions.
-        7. **Case Studies and Examples** (Optional):
-            - Provide real-world examples to illustrate its impact.
-        8. **See Also** (Optional):
-            - Suggest related topics for further exploration.
-        9. **References**:
-            - Include URLs in full text (with access dates if possible).
-        """,
-        },
-    ]
 
-    response = researchClient.chat.completions.create(
-        model="llama-3.1-sonar-large-128k-online",
-        messages=messages,
-    )
-
-    return response.choices[0].message.content
-
-# Async function to generate an article using ChatGPT based on research data
-async def generate_article_from_research(project_name, research_data):
+# Async function to generate an article using a specific system prompt
+async def generate_article_from_research(project_name, research_data, system_prompt, user_prompt):
     log_message(f"Generating Wikipedia-style article for project: {project_name}")
     messages = [
-        {
-            "role": "system",
-            "content": (
-                """
-You are an expert at writing Wikipedia articles that are both informative and engaging. When generating content, ensure it adheres to Wikipedia's neutral tone and encyclopedic style. The output must be written in Wikimedia markup (not Markdown) and formatted precisely.
-
-Your task is to transform provided research into a structured Wikipedia article. The article should flow naturally, be concise, and avoid technical jargon where possible, while remaining accurate and detailed.
-
-Requirements:
-- **Output in Wikimedia markup** only (no Markdown or plain text formatting).
-- **References must always be included**, even if the content approaches the token limit.
-  - Include references at the end of the article as a numbered list in proper Wikimedia markup using full URLs and access dates (if available).
-  - If necessary, truncate the article's body content slightly to prioritize space for references.
-- Avoid adding internal Wikipedia links (e.g., to related articles) for now.
-- External references, URLs, or sources must be properly formatted in the references section.
-- If data for a specific section is missing, omit the section header entirely.
-
-The final output must be concise yet comprehensive and adhere strictly to Wikimedia standards.
-                """
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"""
-Using the following research data, generate a structured Wikipedia article for the '{project_name}' project/entity. 
-
-### Research Data:
-{research_data}
-
-Key Points to Remember:
-1. Write the article in a structured format directly in Wikimedia markup (do not use Markdown or plain text).
-2. Include all references at the end of the article in a numbered list with proper Wikimedia markup.
-3. Do not include a section header if no data exists for that section.
-4. If token limits are reached, truncate non-critical sections, but always include all references.
-        """,
-        },
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt.format(project_name=project_name, research_data=research_data)},
     ]
 
     response = aiClient.chat.completions.create(
@@ -134,51 +69,103 @@ Key Points to Remember:
     return response.choices[0].message.content
 
 # Async function to process each project
-async def process_projects(projects_file_path):
+async def process_projects(projects_file_path, prompts_file_path):
     try:
-        # Load the XLSX file
-        data = pd.read_excel(projects_file_path)
+        # Load projects and prompts
+        projects_data = pd.read_excel(projects_file_path)
+        prompts_data = load_prompts(prompts_file_path)
 
-        if data.empty:
-            log_message("The file contains no data.")
+        if projects_data.empty:
+            log_message("The projects file contains no data.")
             return
 
         # Add "Article" column if it doesn't exist
-        if "Article" not in data.columns:
-            data["Article"] = ""
+        if "Article" not in projects_data.columns:
+            projects_data["Article"] = ""
 
         log_message("Processing projects and generating research and articles:")
 
         for index, row in tqdm(
-            data.iterrows(), total=data.shape[0], unit="project", colour="yellow"
+            projects_data.iterrows(), total=projects_data.shape[0], unit="project", colour="yellow"
         ):
             project_name = row.get("Name", f"Project_{index+1}")
 
-            # Fetch research data
-            research_data = await fetch_research_data(project_name)
+            # Handle empty or NaN categories and default to "projects"
+            category = row.get("Category")
+            if pd.isna(category) or str(category).strip() == "":
+                category = "projects"
+            else:
+                category = str(category).strip()
 
-            # Sanitize project name for filenames
-            sanitized_project_name = sanitize_filename(project_name)
+            # Ensure prompts_data["Category"] is processed for string operations
+            prompts_data["Category"] = prompts_data["Category"].astype(str).str.strip()
 
-            # Save research data
-            research_file_path = f"research/{sanitized_project_name}.txt"
-            save_to_file(research_file_path, research_data)
+            # Fetch the relevant prompts for the category
+            category_prompts = prompts_data[prompts_data["Category"].eq(category)]
+            if category_prompts.empty:
+                log_message(f"No prompts found for category: {category}")
+                continue
 
-            # Generate Wikipedia-style article
-            article_content = await generate_article_from_research(
-                project_name, research_data
-            )
+            # Sort prompts by index
+            category_prompts = category_prompts.sort_values("index")
 
-            # Save article content to a .wiki file
-            article_file_path = f"articles/{sanitized_project_name}.wiki"
-            save_to_file(article_file_path, article_content)
+            # Initialize previous output for chaining
+            prev_output = ""
 
-            # Update the "Article" column in the XLSX file (might fail since articles are quite big)
-            data.at[index, "Article"] = article_content
+            # Process each prompt
+            for _, prompt_row in category_prompts.iterrows():
+                model = prompt_row["model"].strip().lower()
+                system_prompt = prompt_row["System prompt"]
+                user_prompt_template = prompt_row["Prompt"]
+
+                # Replace placeholders in the user prompt
+                user_prompt = user_prompt_template.replace("${project_name}", project_name).replace("${prev_output}", prev_output)
+
+                # Sanitize project name for filenames
+                sanitized_project_name = sanitize_filename(project_name)
+
+                # Handle "researcher" and "gpt" models
+                if model == "researcher":
+                    result = await fetch_research_data(project_name, system_prompt, user_prompt)
+                elif model == "gpt":
+                    result = await generate_article_from_research(project_name, prev_output, system_prompt, user_prompt)
+                else:
+                    log_message(f"Unsupported model: {model}")
+                    continue
+
+                # Save the result to a file
+                file_path = f"research/{sanitized_project_name}_{prompt_row['index']}.md"
+                save_to_file(file_path, result)
+
+                # Update prev_output for the next prompt
+                prev_output = result
+
+            # Save the final output of the last "gpt" prompt as the article
+            
+            # article_file_path = f"articles/{sanitized_project_name}.wiki"
+            # save_to_file(article_file_path, prev_output)
+            
+            last_md_file = f"research/{sanitized_project_name}_{prompt_row['index']}.md"
+            wiki_file_path = f"articles/{sanitized_project_name}.wiki"
+
+            try:
+                # Run pandoc to convert the last .md file to a .wiki file
+                subprocess.run(
+                    ["pandoc", last_md_file, "-t", "mediawiki", "-o", wiki_file_path],
+                    check=True
+                )
+                print(f"Successfully generated {wiki_file_path} from {last_md_file}")
+            except subprocess.CalledProcessError as e:
+                print(f"Error during pandoc conversion: {e}")
+            except FileNotFoundError:
+                print("Pandoc is not installed or not in the system PATH.")
+
+            # Update the "Article" column in the XLSX file
+            # projects_data.at[index, "Article"] = prev_output
 
         # Save the updated XLSX file
-        data.to_excel(projects_file_path, index=False)
-        log_message("Processing completed, XLSX file updated with generated articles.")
+        # projects_data.to_excel(projects_file_path, index=False)
+        log_message("Processing completed, articles generated successfully")
 
     except Exception as e:
         log_message(f"Error: {e}")
@@ -190,15 +177,22 @@ def main():
     )
 
     parser.add_argument(
-        "--file-path",
+        "--projects-file",
         type=str,
         default="resources/projects.xlsx",
-        help='Path to the XLSX file. Default is "resources/projects.xlsx".',
+        help='Path to the projects XLSX file. Default is "resources/projects.xlsx".',
+    )
+
+    parser.add_argument(
+        "--prompts-file",
+        type=str,
+        default="resources/prompts.xlsx",
+        help='Path to the prompts XLSX file. Default is "resources/prompts.xlsx".',
     )
 
     args = parser.parse_args()
 
-    asyncio.run(process_projects(args.file_path))
+    asyncio.run(process_projects(args.projects_file, args.prompts_file))
 
 if __name__ == "__main__":
     main()

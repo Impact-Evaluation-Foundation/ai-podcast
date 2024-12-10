@@ -1,4 +1,6 @@
 resources/*.xlsx
+!resources/prompts.xlsx
+notebooks/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
