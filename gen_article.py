@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import argparse
 from tqdm import tqdm
@@ -43,6 +44,39 @@ def sanitize_filename(name):
 def load_prompts(prompts_file_path):
     return pd.read_excel(prompts_file_path)
 
+
+def convert_json_to_infobox(json_data):
+    # Start the infobox
+    infobox = "{{Infobox(Generic Article)\n"
+
+    # Adding each field from JSON to the infobox
+    infobox += f"| title = {json_data.get('title', 'Unknown Title')}\n"
+    infobox += f"| overview = {json_data.get('overview', 'No overview provided.')}\n"
+    infobox += f"| importance = {json_data.get('importance', 'Unknown')}\n"
+
+    # Handling related topics (comma-separated)
+    related_topics = ", ".join(json_data.get('related_topics', []))
+    infobox += f"| related_topics = {related_topics}\n"
+
+    # Handling external resources (formatted as links)
+    external_resources = ""
+    for resource in json_data.get('external_resources', []):
+        url = resource.get('url', '')
+        description = resource.get('description', '')
+        if url and description:
+            external_resources += f"[{url} {description}], "
+    
+    # Remove the trailing comma and space, if any
+    if external_resources.endswith(", "):
+        external_resources = external_resources[:-2]
+
+    infobox += f"| external_resources = \n{external_resources}\n"
+
+    # Closing the infobox
+    infobox += "}}"
+
+    return infobox
+
 # Async function to fetch research data with Tavily x GPT
 async def fetch_research_data(project_name, system_prompt, user_prompt):
     log_message(f"Fetching research data for project: {project_name}")
@@ -52,10 +86,39 @@ async def fetch_research_data(project_name, system_prompt, user_prompt):
     
     return report
 
+# Utility: Generate the Infobox JSON
+async def generate_infobox_json(project_name, prev_output, infobox_system_prompt, infobox_user_prompt):
+    # Replace placeholders in the infobox user prompt
+    user_prompt = infobox_user_prompt.replace("${project_name}", project_name).replace("${prev_output}", prev_output)
+    
+    # Create the system and user messages for the prompt
+    messages = [
+        {"role": "system", "content": infobox_system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+    
+    # Generate the response using aiClient
+    response = aiClient.chat.completions.create(
+        model="gpt-4o-mini",  # or the appropriate model
+        messages=messages
+    )
+    
+    # Parse the response to get the JSON object
+    infobox_json = response.choices[0].message.content.strip()
+    
+    # Assuming the response is valid JSON, load it into a dictionary
+    try:
+        infobox_data = json.loads(infobox_json)
+    except json.JSONDecodeError:
+        print("Error parsing the JSON response from the AI model.")
+        return ""
 
-# Async function to generate an article using a specific system prompt
+    # Convert the JSON to the MediaWiki infobox format
+    return convert_json_to_infobox(infobox_data)
+
+# Async function to generate content using a specific system prompt
 async def generate_article_from_research(project_name, research_data, system_prompt, user_prompt):
-    log_message(f"Generating Wikipedia-style article for project: {project_name}")
+    log_message(f"Generating Wikipedia-style content for project: {project_name}")
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt.format(project_name=project_name, research_data=research_data)},
@@ -69,11 +132,12 @@ async def generate_article_from_research(project_name, research_data, system_pro
     return response.choices[0].message.content
 
 # Async function to process each project
-async def process_projects(projects_file_path, prompts_file_path):
+async def process_projects(projects_file_path, prompts_file_path, infobox_prompts_file_path):
     try:
-        # Load projects and prompts
+        # Load projects, prompts, and infobox prompts
         projects_data = pd.read_excel(projects_file_path)
         prompts_data = load_prompts(prompts_file_path)
+        infobox_prompts_data = pd.read_excel(infobox_prompts_file_path)
 
         if projects_data.empty:
             log_message("The projects file contains no data.")
@@ -112,7 +176,7 @@ async def process_projects(projects_file_path, prompts_file_path):
             # Initialize previous output for chaining
             prev_output = ""
 
-            # Process each prompt
+            # Process each prompt in the category (research or article generation)
             for _, prompt_row in category_prompts.iterrows():
                 model = prompt_row["model"].strip().lower()
                 system_prompt = prompt_row["System prompt"]
@@ -140,25 +204,44 @@ async def process_projects(projects_file_path, prompts_file_path):
                 # Update prev_output for the next prompt
                 prev_output = result
 
-            # Save the final output of the last "gpt" prompt as the article
-            
-            # article_file_path = f"articles/{sanitized_project_name}.wiki"
-            # save_to_file(article_file_path, prev_output)
-            
+            # Now, fetch and generate the Infobox JSON
+            # Extract the first infobox prompt for the selected category (assuming only one prompt is used)
+            infobox_prompt_row = infobox_prompts_data[infobox_prompts_data["Category"].eq(category)].iloc[0]
+            infobox_system_prompt = infobox_prompt_row["System prompt"]
+            infobox_user_prompt = infobox_prompt_row["Prompt"]
+
+            infobox_json = await generate_infobox_json(project_name, prev_output, infobox_system_prompt, infobox_user_prompt)
+
+            # Prepend the infobox to the article
             last_md_file = f"research/{sanitized_project_name}_{prompt_row['index']}.md"
             wiki_file_path = f"articles/{sanitized_project_name}.wiki"
 
             try:
-                # Run pandoc to convert the last .md file to a .wiki file
+                # Ensure the .md file is properly encoded in UTF-8 before passing it to pandoc
+                with open(last_md_file, 'r', encoding='utf-8', errors='replace') as md_file:
+                    md_content = md_file.read()
+
+                # Run pandoc to convert the last .md file to a .wiki file, specifying utf-8 encoding
                 subprocess.run(
                     ["pandoc", last_md_file, "-t", "mediawiki", "-o", wiki_file_path],
                     check=True
                 )
                 print(f"Successfully generated {wiki_file_path} from {last_md_file}")
+    
+                # After pandoc success, prepend the infobox to the .wiki file
+                with open(wiki_file_path, "r+", encoding='utf-8') as file:
+                    content = file.read()
+                    # Prepend the infobox JSON with a newline below it
+                    file.seek(0, 0)
+                    file.write(f"{infobox_json}\n\n" + content)
+
             except subprocess.CalledProcessError as e:
                 print(f"Error during pandoc conversion: {e}")
             except FileNotFoundError:
                 print("Pandoc is not installed or not in the system PATH.")
+            except Exception as e:
+                print(f"Error: {e}")
+
 
             # Update the "Article" column in the XLSX file
             # projects_data.at[index, "Article"] = prev_output
@@ -170,29 +253,34 @@ async def process_projects(projects_file_path, prompts_file_path):
     except Exception as e:
         log_message(f"Error: {e}")
 
-# Main function
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate research and Wikipedia-style articles for projects in an XLSX file."
-    )
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Process project data and generate articles with infoboxes.")
     parser.add_argument(
-        "--projects-file",
-        type=str,
-        default="resources/projects.xlsx",
-        help='Path to the projects XLSX file. Default is "resources/projects.xlsx".',
+        '--infobox-prompts-file', 
+        type=str, 
+        default='resources/infobox_prompts.xlsx', 
+        help="Path to the custom infobox prompts file (default: resources/infobox_prompts.xlsx)"
     )
-
     parser.add_argument(
-        "--prompts-file",
-        type=str,
+        '--projects-file', 
+        type=str, 
+        default="resources/projects.xlsx", 
+        help="Path to the projects file"
+    )
+    parser.add_argument(
+        '--prompts-file', 
+        type=str, 
         default="resources/prompts.xlsx",
-        help='Path to the prompts XLSX file. Default is "resources/prompts.xlsx".',
+        help="Path to the prompts file"
     )
 
-    args = parser.parse_args()
-
-    asyncio.run(process_projects(args.projects_file, args.prompts_file))
+    return parser.parse_args()
 
 if __name__ == "__main__":
-    main()
+    # Parse command line arguments
+    args = parse_arguments()
+
+    # Call the process_projects function with the custom infobox prompts file
+    import asyncio
+    asyncio.run(process_projects(args.projects_file, args.prompts_file, args.infobox_prompts_file))
