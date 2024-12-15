@@ -32,7 +32,7 @@ def log_message(message):
 
 # Utility: Save data to a file
 def save_to_file(file_path, content):
-    with open(file_path, "w") as file:
+    with open(file_path, "w", encoding='utf-8') as file:
         file.write(content)
     print(f"Saved content to {file_path}")
 
