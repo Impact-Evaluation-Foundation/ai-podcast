@@ -84,7 +84,13 @@ async def fetch_research_data(project_name, system_prompt, user_prompt):
     research_result = await researcher.conduct_research()
     report = await researcher.write_report()
     
-    return report
+    references_index = report.find("## References")
+    content_below_references = ""
+    if references_index != -1:
+        # Skip "## References" heading and any trailing whitespace/newlines
+        content_below_references = report[references_index + len("## References"):].lstrip()
+    
+    return content_below_references
 
 # Utility: Generate the Infobox JSON
 async def generate_infobox_json(project_name, prev_output, infobox_system_prompt, infobox_user_prompt):
@@ -99,7 +105,7 @@ async def generate_infobox_json(project_name, prev_output, infobox_system_prompt
     
     # Generate the response using aiClient
     response = aiClient.chat.completions.create(
-        model="gpt-4o-mini",  # or the appropriate model
+        model="gpt-4o",  # or the appropriate model
         messages=messages
     )
     
