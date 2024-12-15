@@ -105,7 +105,7 @@ async def generate_infobox_json(project_name, prev_output, infobox_system_prompt
     
     # Generate the response using aiClient
     response = aiClient.chat.completions.create(
-        model="gpt-4o",  # or the appropriate model
+        model="gpt-4o-mini",  # or the appropriate model
         messages=messages
     )
     
@@ -131,7 +131,7 @@ async def generate_article_from_research(project_name, research_data, system_pro
     ]
 
     response = aiClient.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=messages,
     )
 
