@@ -18,6 +18,7 @@ load_dotenv()
 os.environ['OPENAI_API_KEY']=os.getenv("OPENAI_API_KEY")
 os.environ['TAVILY_API_KEY']=os.getenv("TAVILY_API_KEY")
 API_KEY = os.getenv("PERPLEXITY_KEY")
+perplexity_client = OpenAI(api_key=API_KEY, base_url="https://api.perplexity.ai/")
 aiClient = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Create necessary directories
@@ -124,7 +125,7 @@ async def generate_infobox_json(project_name, prev_output, infobox_system_prompt
 
 # Async function to generate content using a specific system prompt
 async def generate_article_from_research(project_name, research_data, system_prompt, user_prompt):
-    log_message(f"Generating Wikipedia-style content for project: {project_name}")
+    log_message(f"Generating content for project w GPT-4o: {project_name}")
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt.format(project_name=project_name, research_data=research_data)},
@@ -132,6 +133,22 @@ async def generate_article_from_research(project_name, research_data, system_pro
 
     response = aiClient.chat.completions.create(
         model="gpt-4o",
+        messages=messages,
+    )
+
+    return response.choices[0].message.content
+
+# Generate content using Perplexity AI
+async def generate_perplexity_research(project_name, research_data, system_prompt, user_prompt):
+    log_message(f"Generating content using Perplexity for project: {project_name}")
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt.format(project_name=project_name, research_data=research_data)},
+    ]
+
+    response = perplexity_client.chat.completions.create(
+        model="sonar-pro",
         messages=messages,
     )
 
