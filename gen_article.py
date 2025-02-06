@@ -10,6 +10,8 @@ import re
 from gpt_researcher import GPTResearcher
 import subprocess
 
+from utils import check_urls, handle_question_generator
+
 
 # Load environment variables
 load_dotenv()
@@ -154,6 +156,24 @@ async def generate_perplexity_research(project_name, research_data, system_promp
 
     return response.choices[0].message.content
 
+async def generate_clean_content(project_name: str, bad_urls: list, original_content: str, system_prompt: str, user_prompt: str) -> str:
+    """Generate cleaned content by removing/replacing invalid URLs"""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt.format(
+            bad_urls="\n".join(bad_urls),
+            original_content=original_content
+        )}
+    ]
+    
+    response = aiClient.chat.completions.create(
+        model="gpt-4",
+        messages=messages,
+        temperature=0.2  # Keep it factual
+    )
+    
+    return response.choices[0].message.content.strip()
+
 # Async function to process each project
 async def process_projects(projects_file_path, prompts_file_path, infobox_prompts_file_path):
     try:
@@ -175,107 +195,199 @@ async def process_projects(projects_file_path, prompts_file_path, infobox_prompt
         for index, row in tqdm(
             projects_data.iterrows(), total=projects_data.shape[0], unit="project", colour="yellow"
         ):
-            project_name = row.get("Name", f"Project_{index+1}")
+            context = {
+                # Project metadata
+                "project_name": row.get("Name", f"Project_{index+1}"),
+                "category": str(row.get("Category", "projects")).strip(),
+                "sanitized_name": sanitize_filename(row.get("Name", f"Project_{index+1}")),
+                "topic":row.get("Name", f"Project_{index+1}"),
+                # Research components
+                "prev_output": "",
+                "question_1": None,
+                "question_2": None,
+                "question_3": None,
+                "question_4": None,
+                "question_5": None,
+                "question_6": None,
+                "question_7": None,
+                "question_8": None,
+                "question_9": None,
+                "question_10": None,
+                "tavily_question": None,
+                "tavily_question_answers_references": None,
+                "list_of_perplexity_questions_answers_references": [],
+                
+                # System tracking
+                "research_files": [],
+                "errors": []
+            }
 
-            # Handle empty or NaN categories and default to "projects"
-            category = row.get("Category")
-            if pd.isna(category) or str(category).strip() == "":
-                category = "projects"
-            else:
-                category = str(category).strip()
-
-            # Ensure prompts_data["Category"] is processed for string operations
-            prompts_data["Category"] = prompts_data["Category"].astype(str).str.strip()
-
-            # Fetch the relevant prompts for the category
-            category_prompts = prompts_data[prompts_data["Category"].eq(category)]
-            if category_prompts.empty:
-                log_message(f"No prompts found for category: {category}")
-                continue
-
-            # Sort prompts by index
-            category_prompts = category_prompts.sort_values("index")
-
-            # Initialize previous output for chaining
-            prev_output = ""
-
-            # Process each prompt in the category (research or article generation)
-            for _, prompt_row in category_prompts.iterrows():
-                model = prompt_row["model"].strip().lower()
-                system_prompt = prompt_row["System prompt"]
-                user_prompt_template = prompt_row["Prompt"]
-
-                # Replace placeholders in the user prompt
-                user_prompt = user_prompt_template.replace("${project_name}", project_name).replace("${prev_output}", prev_output)
-
-                # Sanitize project name for filenames
-                sanitized_project_name = sanitize_filename(project_name)
-
-                # Handle "researcher" and "gpt" models
-                if model == "researcher":
-                    result = await fetch_research_data(project_name, system_prompt, user_prompt)
-                elif model == "gpt":
-                    result = await generate_article_from_research(project_name, prev_output, system_prompt, user_prompt)
-                else:
-                    log_message(f"Unsupported model: {model}")
-                    continue
-
-                # Save the result to a file
-                file_path = f"research/{sanitized_project_name}_{prompt_row['index']}.md"
-                save_to_file(file_path, result)
-
-                # Update prev_output for the next prompt
-                prev_output = result
-
-            # Now, fetch and generate the Infobox JSON
-            # Extract the first infobox prompt for the selected category (assuming only one prompt is used)
-            infobox_prompt_row = infobox_prompts_data[infobox_prompts_data["Category"].eq(category)].iloc[0]
-            infobox_system_prompt = infobox_prompt_row["System prompt"]
-            infobox_user_prompt = infobox_prompt_row["Prompt"]
-
-            infobox_json = await generate_infobox_json(project_name, prev_output, infobox_system_prompt, infobox_user_prompt)
-
-            # Prepend the infobox to the article
-            last_md_file = f"research/{sanitized_project_name}_{prompt_row['index']}.md"
-            wiki_file_path = f"articles/{sanitized_project_name}.wiki"
+            # Sanitize category
+            if pd.isna(context["category"]) or context["category"] == "":
+                context["category"] = "projects"
 
             try:
-                # Ensure the .md file is properly encoded in UTF-8 before passing it to pandoc
-                with open(last_md_file, 'r', encoding='utf-8', errors='replace') as md_file:
-                    md_content = md_file.read()
+                # Load relevant prompts
+                prompts_data["Category"] = prompts_data["Category"].astype(str).str.strip()
+                category_prompts = prompts_data[prompts_data["Category"].eq(context["category"])]
+                if category_prompts.empty:
+                    log_message(f"No prompts found for category: {context['category']}")
+                    continue
 
-                # Run pandoc to convert the last .md file to a .wiki file, specifying utf-8 encoding
-                subprocess.run(
-                    ["pandoc", last_md_file, "-t", "mediawiki", "-o", wiki_file_path],
-                    check=True
-                )
-                print(f"Successfully generated {wiki_file_path} from {last_md_file}")
-    
-                # After pandoc success, prepend the infobox to the .wiki file
-                with open(wiki_file_path, "r+", encoding='utf-8') as file:
-                    content = file.read()
-                    # Prepend the infobox JSON with a newline below it
-                    file.seek(0, 0)
-                    file.write(f"{infobox_json}\n\n" + content)
+                # Process prompts in index order
+                for _, prompt_row in category_prompts.sort_values("index").iterrows():
+                    try:
+                        # Get prompt configuration
+                        model = prompt_row["model"].strip().lower()
+                        prompt_type = prompt_row.get("Prompt type", "").strip().lower() or None
+                        system_prompt = prompt_row["System prompt"]
+                        user_template = prompt_row["Prompt"]
+                        prompt_index = prompt_row["index"]
 
-            except subprocess.CalledProcessError as e:
-                print(f"Error during pandoc conversion: {e}")
-            except FileNotFoundError:
-                print("Pandoc is not installed or not in the system PATH.")
+                        # Format user prompt with context
+                        user_prompt = user_template
+                        for key in context:
+                            value = context[key]
+                            if isinstance(value, list):
+                                formatted_value = "\n\n".join(value)
+                            else:
+                                formatted_value = str(value or "")
+                            user_prompt = user_prompt.replace(f"${{{key}}}", formatted_value)
+                        
+                        # Save the formatted prompt for debugging
+                        prompt_debug_path = f"prompts/{context['sanitized_name']}_{prompt_index}.md"
+                        save_to_file(prompt_debug_path, user_prompt)
+                        
+                        # Execute prompt based on type and model
+                        result = None
+                        if model == "researcher":
+                            result = await fetch_research_data(
+                                context["project_name"], 
+                                system_prompt, 
+                                user_prompt
+                            )
+                            if prompt_type == "tavily_answer":
+                                context["tavily_question_answers_references"] = result
+
+                        elif model == "gpt":
+                            if prompt_type == "url_cleaner":
+                                # Get references from context
+                                tavily_refs = context.get('tavily_question_answers_references', '')
+                                perplexity_refs = "\n".join(context.get('list_of_perplexity_questions_answers_references', []))
+                
+                                # Validate URLs and clean content
+                                bad_urls = await check_urls(tavily_refs, perplexity_refs)
+                                result = await generate_clean_content(
+                                    context["project_name"],
+                                    bad_urls,
+                                    context["prev_output"],  # Content to clean
+                                    system_prompt,
+                                    user_prompt.replace("${bad_urls}", "\n".join(bad_urls))
+                                )
+                            else:
+                                # Original article generation
+                                result = await generate_article_from_research(
+                                context["project_name"],
+                                context["prev_output"],
+                                system_prompt,
+                                user_prompt
+                                )
+                            if prompt_type == "question_generator":
+                                parsed = handle_question_generator(result)
+                                context.update(parsed)
+                           
+
+                        elif model == "perplexity":
+                            result = await generate_perplexity_research(
+                                context["project_name"],
+                                context["prev_output"],
+                                system_prompt,
+                                user_prompt
+                            )
+                            if prompt_type == "perplexity_answers":
+                                context["list_of_perplexity_questions_answers_references"].append(result)
+
+                        else:
+                            log_message(f"Unsupported model: {model}")
+                            continue
+
+                        # Update context and save results
+                        if result:
+                            # Save output file
+                            filename = f"{context['sanitized_name']}_{prompt_index}.md"
+                            file_path = f"research/{filename}"
+                            save_to_file(file_path, result)
+                            context["research_files"].append(file_path)
+                            
+                            # Update previous output for legacy prompts
+                            if not prompt_type:
+                                context["prev_output"] = result
+                            else:
+                                context["prev_output"] = result  # Still update for chaining
+
+                    except Exception as e:
+                        error_msg = f"Prompt {prompt_index} failed: {str(e)}"
+                        context["errors"].append(error_msg)
+                        log_message(error_msg)
+                        continue
+
+                # Generate final infobox
+                try:
+                    infobox_prompt_row = infobox_prompts_data[
+                        infobox_prompts_data["Category"].eq(context["category"])
+                    ].iloc[0]
+
+                    # Format infobox prompt with full context
+                    infobox_user_prompt = infobox_prompt_row["Prompt"]
+                    for key in context:
+                        value = context[key]
+                        infobox_user_prompt = infobox_user_prompt.replace(
+                            f"${{{key}}}", 
+                            "\n".join(value) if isinstance(value, list) else str(value or "")
+                        )
+
+                    infobox_json = await generate_infobox_json(
+                        context["project_name"],
+                        context["prev_output"],
+                        infobox_prompt_row["System prompt"],
+                        infobox_user_prompt
+                    )
+
+                    # Convert to wiki format
+                    if context["research_files"]:
+                        last_md = context["research_files"][-1]
+                        wiki_path = f"articles/{context['sanitized_name']}.wiki"
+                        
+                        subprocess.run(
+                            ["pandoc", last_md, "-t", "mediawiki", "-o", wiki_path],
+                            check=True
+                        )
+                        
+                        # Prepend infobox
+                        with open(wiki_path, "r+", encoding='utf-8') as f:
+                            content = f.read()
+                            f.seek(0, 0)
+                            f.write(f"{infobox_json}\n\n{content}")
+
+                except Exception as e:
+                    error_msg = f"Infobox generation failed: {str(e)}"
+                    context["errors"].append(error_msg)
+                    log_message(error_msg)
+
+                # Update projects data
+                projects_data.at[index, "Article"] = context["prev_output"]
+
             except Exception as e:
-                print(f"Error: {e}")
+                error_msg = f"Project {context['project_name']} failed: {str(e)}"
+                context["errors"].append(error_msg)
+                log_message(error_msg)
 
-
-            # Update the "Article" column in the XLSX file
-            # projects_data.at[index, "Article"] = prev_output
-
-        # Save the updated XLSX file
-        # projects_data.to_excel(projects_file_path, index=False)
-        log_message("Processing completed, articles generated successfully")
+        # Save updated projects data
+        projects_data.to_excel(projects_file_path, index=False)
+        log_message("Processing completed. Check 'articles' directory for outputs.")
 
     except Exception as e:
-        log_message(f"Error: {e}")
-
+        log_message(f"Critical system error: {str(e)}")
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Process project data and generate articles with infoboxes.")
