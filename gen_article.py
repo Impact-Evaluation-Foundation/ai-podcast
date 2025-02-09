@@ -25,6 +25,7 @@ aiClient = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Create necessary directories
 os.makedirs("research", exist_ok=True)
+os.makedirs("prompts", exist_ok=True)
 os.makedirs("articles", exist_ok=True)
 
 # Utility: Log messages with formatting
@@ -167,7 +168,7 @@ async def generate_clean_content(project_name: str, bad_urls: list, original_con
     ]
     
     response = aiClient.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4o",
         messages=messages,
         temperature=0.2  # Keep it factual
     )
